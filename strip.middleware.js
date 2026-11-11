@@ -1,375 +1,354 @@
-// magpie-strip-harness — magpie 网关中间件
-// 由 patterns 驱动的通用 system 身份提示剥离：在请求路由前，把 agent 请求体
-// system role 里由任意 harness 注入的身份提示剥离，其余内容原样保留。
-// 只改请求，不碰回复与事件。具体 harness 的规则全部由配置提供，代码不内置。
-//
-// 运行环境是 moejs（网关内置 JS 引擎）：只有标准 JS，可用的语法刻意保持保守
-// （无可选链 / 空值合并 / 展开运算符 / 后行断言）。
-//
-// patterns 两种条目：
-//   1) 普通字符串（"/regex/flags" 或大小写不敏感子串）——段落级删除。
-//      按空行分段丢整段；没有空行结构、或段落级会清空全文时退化为丢命中行。
-//   2) 对象 { match, replace? } ——行级。
-//      replace 把命中片段就地中和并保留整行其余内容；省略则删除命中行。
-// 行级规则按配置顺序依次作用于当前行（前面规则改写过的版本）。
+// magpie gateway middleware: conservatively clean configured harness identity
+// from supported system/developer targets while preserving protocol structure.
 
-// 出厂默认配置，与 package.json 的 magpie.options.patterns 保持一致。
-// 这只是可整体替换的示例默认值，不是逻辑的一部分。
-const DEFAULT_PATTERNS = [
-  "/deepseek[\\s_-]*harness/i",
-  { match: "/You are ZCode, an interactive agent/i" },
-  { match: "/^# ZCode Desktop Context\\s*$/i", replace: "# Desktop Context" },
-  { match: "/window\\.zcode/i", replace: "window" },
-  { match: ".zcode" },
-  { match: "/[._-]*z[._-]*code/i", replace: "" }
-]
+const MAX_RULES = 100
+const MAX_REGEX_LENGTH = 512
+const MAX_MATCH_LENGTH = 4096
+const MAX_TARGET_LENGTH = 1048576
+let cachedRuleSignature = null
+let cachedRuleCompilation = null
 
-function escapeRegExp(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+function log(options, message) {
+  if (options && options.debug === true && typeof console !== "undefined" && console.log) {
+    console.log("[strip-harness] " + message)
+  }
 }
 
-// 编译成统一 rule：{ line, deletion, test, replace }。
-// "/regex/flags" 用正则，其余字符串按大小写不敏感字面量匹配。
-function compilePattern(p) {
-  let spec, line, replacement
-  if (typeof p === "string") {
-    spec = p.trim()
-    line = false
-    replacement = null
-  } else if (p && typeof p === "object" && !Array.isArray(p) && typeof p.match === "string") {
-    spec = p.match.trim()
-    line = true
-    replacement = typeof p.replace === "string" ? p.replace : null
-  } else {
-    return null
-  }
-  if (!spec) return null
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
 
-  const m = /^\/(.+)\/([a-z]*)$/.exec(spec)
-  const src = m ? m[1] : escapeRegExp(spec)
-  const flags = m ? m[2] || "i" : "i"
-
-  let testRe
-  try {
-    // test 用的正则去掉 g，避免 lastIndex 状态污染。
-    testRe = new RegExp(src, flags.replace(/g/g, "") || "i")
-  } catch (e) {
-    return null // 非法正则：跳过该条，等效于不存在
+function compileRules(options) {
+  if (!options || !Object.prototype.hasOwnProperty.call(options, "rules")) {
+    return { rules: [], error: null }
   }
-  let globalRe = null
-  if (replacement !== null) {
-    try {
-      globalRe = new RegExp(src, flags.indexOf("g") === -1 ? flags + "g" : flags)
-    } catch (e) {
-      globalRe = null
+  if (options.patterns !== undefined || options.stripAll !== undefined) {
+    return { rules: [], error: "legacy patterns/stripAll options are not supported; use versioned rules" }
+  }
+  const config = options.rules
+  if (!config || typeof config !== "object" || Array.isArray(config) || config.version !== 1 || !Array.isArray(config.rules)) {
+    return { rules: [], error: "rules must be { version: 1, rules: [...] }" }
+  }
+  let signature
+  try { signature = JSON.stringify(config) } catch (e) { return { rules: [], error: "rules configuration must be serializable" } }
+  if (signature === cachedRuleSignature) return cachedRuleCompilation
+  if (config.rules.length > MAX_RULES) return { rules: [], error: "rule limit exceeded" }
+
+  const compiled = []
+  const ids = Object.create(null)
+  for (let i = 0; i < config.rules.length; i++) {
+    const rule = config.rules[i]
+    if (!rule || typeof rule !== "object" || Array.isArray(rule) || typeof rule.id !== "string" || !rule.id.trim()) {
+      return { rules: [], error: "rule " + i + " requires a non-empty id" }
     }
-  }
-  const gr = globalRe
-  return {
-    line: line,
-    deletion: replacement === null,
-    test: function (t) { return testRe.test(t) },
-    replace: function (t) { return gr ? t.replace(gr, replacement) : t }
-  }
-}
-
-function getMatchers(options) {
-  const src =
-    options && Array.isArray(options.patterns) && options.patterns.length > 0
-      ? options.patterns
-      : DEFAULT_PATTERNS
-  const out = []
-  for (let i = 0; i < src.length; i++) {
-    const m = compilePattern(src[i])
-    if (m) out.push(m)
-  }
-  if (out.length === 0 && src !== DEFAULT_PATTERNS) {
-    // patterns 全部无效（如正则笔误）时退回默认，避免清洗整个静默失效
-    for (let j = 0; j < DEFAULT_PATTERNS.length; j++) {
-      const m = compilePattern(DEFAULT_PATTERNS[j])
-      if (m) out.push(m)
+    if (ids[rule.id]) return { rules: [], error: "duplicate rule id: " + rule.id }
+    ids[rule.id] = true
+    if (!Array.isArray(rule.roles) || rule.roles.length === 0) return { rules: [], error: rule.id + ": roles must be a non-empty array" }
+    for (let j = 0; j < rule.roles.length; j++) {
+      if (rule.roles[j] !== "system" && rule.roles[j] !== "developer") return { rules: [], error: rule.id + ": unsupported role" }
     }
-  }
-  return out
-}
-
-function hit(text, rules) {
-  for (let i = 0; i < rules.length; i++) {
-    try {
-      if (rules[i].test(text)) return true
-    } catch (e) {
-      /* 单条模式对当前输入抛错时视为不命中 */
+    if (["span", "line", "block", "target"].indexOf(rule.unit) === -1) return { rules: [], error: rule.id + ": unsupported unit" }
+    if (!rule.match || typeof rule.match !== "object" || ["exact", "contains", "regex"].indexOf(rule.match.type) === -1 || typeof rule.match.value !== "string" || !rule.match.value) {
+      return { rules: [], error: rule.id + ": invalid match" }
     }
-  }
-  return false
-}
-
-// 段落级：按空行分段，丢弃命中的整段；没有空行结构、或段落级会清空全文时，
-// 改为丢弃命中的行，避免误杀无匹配的行。
-function stripParagraphs(str, paraRules) {
-  const paras = str.split(/\n[ \t]*\n/)
-  if (paras.length > 1) {
-    const kept = []
-    let removed = 0
-    for (let i = 0; i < paras.length; i++) {
-      if (hit(paras[i], paraRules)) removed++
-      else kept.push(paras[i])
+    if (rule.match.value.length > MAX_MATCH_LENGTH) return { rules: [], error: rule.id + ": match length limit exceeded" }
+    if (!rule.action || typeof rule.action !== "object" || ["delete", "replace", "drop-target"].indexOf(rule.action.type) === -1) {
+      return { rules: [], error: rule.id + ": invalid action" }
     }
-    if (removed > 0 && kept.length > 0) return { text: kept.join("\n\n"), changed: true }
+    if ((rule.unit === "target") !== (rule.action.type === "drop-target")) return { rules: [], error: rule.id + ": target units require drop-target; other units cannot drop-target" }
+    if (rule.action.type === "replace" && typeof rule.action.value !== "string") return { rules: [], error: rule.id + ": replace action requires a string value" }
+    if (rule.action.type !== "replace" && rule.action.value !== undefined) return { rules: [], error: rule.id + ": only replace action accepts a value" }
+
+    let source = rule.match.value
+    let flags = rule.match.flags || ""
+    if (rule.match.type === "regex") {
+      if (source.length > MAX_REGEX_LENGTH) return { rules: [], error: rule.id + ": regex length limit exceeded" }
+      if (/[^imsu]/.test(flags) || /(.).*\1/.test(flags)) return { rules: [], error: rule.id + ": unsupported regex flags" }
+    } else {
+      if (rule.match.flags !== undefined) return { rules: [], error: rule.id + ": flags are only valid for regex matches" }
+      source = escapeRegExp(source)
+      flags = "g"
+      if (rule.match.type === "exact") source = "^(?:" + source + ")$"
+    }
+    if (rule.match.type === "regex" && rule.unit === "span") flags += flags.indexOf("g") === -1 ? "g" : ""
+    let expression
+    try { expression = new RegExp(source, flags) } catch (e) { return { rules: [], error: rule.id + ": invalid regex: " + e.message } }
+    compiled.push({
+      id: rule.id,
+      roles: rule.roles.slice(),
+      unit: rule.unit,
+      matchType: rule.match.type,
+      expression: expression,
+      action: rule.action.type,
+      value: rule.action.value
+    })
   }
-  const lines = str.split(/\n/)
-  const keptLines = []
-  let removedLines = 0
-  for (let j = 0; j < lines.length; j++) {
-    if (lines[j].length > 0 && hit(lines[j], paraRules)) removedLines++
-    else keptLines.push(lines[j])
-  }
-  return { text: keptLines.join("\n"), changed: removedLines > 0 }
+  cachedRuleSignature = signature
+  cachedRuleCompilation = { rules: compiled, error: null }
+  return cachedRuleCompilation
 }
 
-// 行级：最小删除单位是行。规则按配置顺序作用在当前行。
-function applyLineRules(text, lineRules) {
-  const lines = String(text).split("\n")
-  const out = []
+function supportsRole(rule, role) {
+  return rule.roles.indexOf(role) !== -1
+}
+
+function matches(rule, text) {
+  rule.expression.lastIndex = 0
+  return rule.expression.test(text)
+}
+
+function replaceMatches(rule, text, replacement) {
+  rule.expression.lastIndex = 0
+  return text.replace(rule.expression, replacement === undefined ? rule.value : replacement)
+}
+
+function transformLine(text, rule) {
+  const parts = text.split(/(\r\n|\n|\r)/)
+  const kept = []
   let changed = false
-  for (let i = 0; i < lines.length; i++) {
-    let cur = lines[i]
-    let drop = false
-    for (let r = 0; r < lineRules.length; r++) {
-      const rule = lineRules[r]
-      let matched = false
-      try {
-        matched = rule.test(cur)
-      } catch (e) {
-        matched = false
+  for (let i = 0; i < parts.length; i += 2) {
+    const line = parts[i]
+    const separator = parts[i + 1] || ""
+    if (matches(rule, line)) {
+      if (rule.action === "delete") {
+        changed = true
+        continue
       }
-      if (!matched) continue
-      if (rule.deletion) {
-        drop = true
+      if (rule.action === "replace" && line !== rule.value) {
+        kept.push(rule.value + separator)
+        changed = true
+        continue
+      }
+    }
+    kept.push(line + separator)
+  }
+  const rewritten = changed ? kept.join("") : text
+  return { text: rewritten, changed: changed, deleted: changed && rewritten.trim().length === 0 }
+}
+
+function transformSegment(text, rule) {
+  if (rule.unit === "line") return transformLine(text, rule)
+  if (rule.unit === "block") {
+    if (!matches(rule, text)) return { text: text, deleted: false, changed: false }
+    if (rule.action === "delete") return { text: "", deleted: true, changed: true }
+    if (rule.action === "replace") return { text: rule.value, deleted: false, changed: text !== rule.value }
+  }
+  if (rule.unit === "span") {
+    if (!matches(rule, text)) return { text: text, deleted: false, changed: false }
+    const rewritten = rule.action === "delete" ? replaceMatches(rule, text, "") : replaceMatches(rule, text)
+    return { text: rewritten, deleted: false, changed: rewritten !== text }
+  }
+  return { text: text, deleted: false, changed: false }
+}
+
+function executeTarget(target, rules) {
+  const segments = target.segments.map(function (segment) {
+    return { text: segment.text, index: segment.index, kind: segment.kind, deleted: false }
+  })
+  let dropTarget = false
+  const changes = []
+  for (let i = 0; i < rules.length; i++) {
+    const rule = rules[i]
+    if (!supportsRole(rule, target.role)) continue
+    if (rule.unit === "target") {
+      const whole = segments.filter(function (segment) { return !segment.deleted }).map(function (segment) { return segment.text }).join("\n")
+      if (whole.length <= MAX_TARGET_LENGTH && matches(rule, whole)) {
+        dropTarget = true
+        changes.push({ ruleId: rule.id, action: "drop-target" })
         break
       }
-      let next = cur
-      try {
-        next = rule.replace(cur)
-      } catch (e) {
-        next = cur
-      }
-      if (next !== cur) {
-        cur = next
-        changed = true
-      }
-    }
-    if (drop) {
-      changed = true
       continue
     }
-    out.push(cur)
+    for (let j = 0; j < segments.length; j++) {
+      const segment = segments[j]
+      if (segment.deleted) continue
+      const result = transformSegment(segment.text, rule)
+      if (!result.changed) continue
+      segment.text = result.text
+      segment.deleted = result.deleted === true
+      changes.push({ ruleId: rule.id, action: rule.action, segment: segment.index })
+    }
   }
-  if (!changed) return { text: String(text), changed: false }
-  return { text: out.join("\n"), changed: true }
+  if (dropTarget) return { changed: true, drop: true, segments: segments, changes: changes }
+  if (changes.length === 0) return { changed: false, segments: segments, changes: [] }
+  const live = segments.filter(function (segment) { return !segment.deleted })
+  const hasRemainingText = live.some(function (segment) { return segment.text.trim().length > 0 })
+  const hasNonText = target.format !== "string" && target.source.some(function (item) {
+    return !(item && typeof item === "object" && typeof item.text === "string") && !(target.format === "gemini-parts" && typeof item === "string")
+  })
+  return { changed: true, drop: !hasRemainingText && !hasNonText, segments: segments, changes: changes }
 }
 
-function stripText(text, rules) {
-  const str = String(text)
-  if (!str || !hit(str, rules)) return { text: str, changed: false }
-
-  const paraRules = []
-  const lineRules = []
-  for (let i = 0; i < rules.length; i++) {
-    if (rules[i].line) lineRules.push(rules[i])
-    else paraRules.push(rules[i])
-  }
-
-  const afterPara = stripParagraphs(str, paraRules)
-  if (lineRules.length === 0) return afterPara
-  const lineResult = applyLineRules(afterPara.text, lineRules)
-  return { text: lineResult.text, changed: afterPara.changed || lineResult.changed }
-}
-
-// stripAll: 命中即移除整个 system 内容（该消息/字段整体删除）
-function processText(text, rules, stripAll) {
-  const str = String(text)
-  if (stripAll) {
-    if (!str || !hit(str, rules)) return { text: str, changed: false }
-    return { text: "", changed: true }
-  }
-  return stripText(text, rules)
-}
-
-// 对一段 content（字符串或 parts 数组）做剔除。
-// 返回 null 表示结构不适用；changed=false 表示原样保留。
-function stripContent(content, rules, stripAll) {
+function makeContentTarget(role, content, id, stringParts) {
   if (typeof content === "string") {
-    const r = processText(content, rules, stripAll)
-    if (!r.changed) return { changed: false }
-    if (!String(r.text).trim()) return { changed: true, removedAll: true }
-    return { changed: true, content: r.text }
+    if (content.length > MAX_TARGET_LENGTH) return null
+    return { id: id, role: role, format: "string", source: content, segments: [{ index: 0, kind: "string", text: content }] }
   }
-  if (Array.isArray(content)) {
-    let changed = false
-    const out = []
-    for (let i = 0; i < content.length; i++) {
-      const part = content[i]
-      if (part && typeof part.text === "string") {
-        const r = processText(part.text, rules, stripAll)
-        if (r.changed) {
-          changed = true
-          if (String(r.text).trim()) out.push(Object.assign({}, part, { text: r.text }))
-          // 变空的 part 直接丢弃
-        } else {
-          out.push(part)
+  if (!Array.isArray(content)) return null
+  const segments = []
+  for (let i = 0; i < content.length; i++) {
+    const item = content[i]
+    if (item && typeof item === "object" && typeof item.text === "string") segments.push({ index: i, kind: "text-object", text: item.text })
+    else if (stringParts && typeof item === "string") segments.push({ index: i, kind: "text-string", text: item })
+  }
+  if (!segments.length || segments.some(function (segment) { return segment.text.length > MAX_TARGET_LENGTH })) return null
+  return { id: id, role: role, format: "array", source: content, segments: segments }
+}
+
+function readRoleTargets(items, idPrefix, stringParts) {
+  const targets = []
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]
+    if (!item || (item.role !== "system" && item.role !== "developer")) continue
+    const target = makeContentTarget(item.role, item.content, idPrefix + ":" + i, stringParts)
+    if (target) {
+      target.index = i
+      target.sourceMessage = item
+      targets.push(target)
+    }
+  }
+  return targets
+}
+
+function createAdapters() {
+  return {
+    chat: {
+      readTargets: function (body) { return Array.isArray(body.messages) ? readRoleTargets(body.messages, "messages", false) : null },
+      applyChanges: function (body, targets, results) {
+        const byIndex = Object.create(null)
+        targets.forEach(function (target) { if (results[target.id] && results[target.id].changed) byIndex[target.index] = { target: target, result: results[target.id] } })
+        const messages = []
+        for (let i = 0; i < body.messages.length; i++) {
+          const update = byIndex[i]
+          if (!update) messages.push(body.messages[i])
+          else if (!update.result.drop) messages.push(Object.assign({}, body.messages[i], { content: buildContent(update.target, update.result) }))
         }
-      } else {
-        out.push(part)
+        body.messages = messages
       }
-    }
-    if (!changed) return { changed: false }
-    if (out.length === 0) return { changed: true, removedAll: true }
-    return { changed: true, content: out }
-  }
-  return null
-}
-
-// chat completions：messages 里 role 为 system / developer 的条目
-function stripChatSystem(body, rules, stripAll) {
-  if (!Array.isArray(body.messages)) return false
-  let changed = false
-  const out = []
-  for (let i = 0; i < body.messages.length; i++) {
-    const msg = body.messages[i]
-    if (!msg || (msg.role !== "system" && msg.role !== "developer")) {
-      out.push(msg)
-      continue
-    }
-    const res = stripContent(msg.content, rules, stripAll)
-    if (res && res.changed) {
-      changed = true
-      if (!res.removedAll) out.push(Object.assign({}, msg, { content: res.content }))
-      // 清空后整条消息移除
-      continue
-    }
-    out.push(msg)
-  }
-  if (changed) body.messages = out
-  return changed
-}
-
-// anthropic messages：body.system（字符串或 blocks 数组，保留 cache_control 等字段）
-function stripAnthropicSystem(body, rules, stripAll) {
-  const sys = body.system
-  if (typeof sys !== "string" && !Array.isArray(sys)) return false
-  const res = stripContent(sys, rules, stripAll)
-  if (!res || !res.changed) return false
-  if (res.removedAll) delete body.system
-  else body.system = res.content
-  return true
-}
-
-// responses：body.instructions + input 里 role 为 system / developer 的条目
-function stripResponsesSystem(body, rules, stripAll) {
-  let changed = false
-  if (typeof body.instructions === "string") {
-    const r = processText(body.instructions, rules, stripAll)
-    if (r.changed) {
-      changed = true
-      if (!String(r.text).trim()) delete body.instructions
-      else body.instructions = r.text
-    }
-  }
-  if (Array.isArray(body.input)) {
-    const out = []
-    let touched = false
-    for (let i = 0; i < body.input.length; i++) {
-      const item = body.input[i]
-      const role = item && item.role
-      if (role === "system" || role === "developer") {
-        const res = stripContent(item.content, rules, stripAll)
-        if (res && res.changed) {
-          touched = true
-          changed = true
-          if (!res.removedAll) out.push(Object.assign({}, item, { content: res.content }))
-          continue
+    },
+    anthropic: {
+      readTargets: function (body) {
+        if (body.system === undefined) return null
+        const target = makeContentTarget("system", body.system, "system", false)
+        return target ? [target] : null
+      },
+      applyChanges: function (body, targets, results) {
+        const result = results.system
+        if (!result || !result.changed) return
+        if (result.drop) delete body.system
+        else body.system = buildContent(targets[0], result)
+      }
+    },
+    responses: {
+      readTargets: function (body) {
+        const targets = []
+        if (typeof body.instructions === "string") {
+          const instruction = makeContentTarget("system", body.instructions, "instructions", false)
+          if (instruction) targets.push(instruction)
         }
-      }
-      out.push(item)
-    }
-    if (touched) body.input = out
-  }
-  return changed
-}
-
-// gemini：systemInstruction / system_instruction（字符串或 {parts:[...]}）
-function stripGeminiSystem(body, rules, stripAll) {
-  let key = null
-  let si = null
-  if (body.systemInstruction !== undefined) {
-    key = "systemInstruction"
-    si = body.systemInstruction
-  } else if (body.system_instruction !== undefined) {
-    key = "system_instruction"
-    si = body.system_instruction
-  }
-  if (!key) return false
-  let changed = false
-  let next = si
-  if (typeof si === "string") {
-    const r = processText(si, rules, stripAll)
-    if (r.changed) {
-      changed = true
-      next = String(r.text).trim() ? r.text : ""
-    }
-  } else if (si && typeof si === "object" && Array.isArray(si.parts)) {
-    const out = []
-    let touched = false
-    for (let i = 0; i < si.parts.length; i++) {
-      const p = si.parts[i]
-      const t = p && typeof p === "object" ? p.text : p
-      if (typeof t === "string") {
-        const r = processText(t, rules, stripAll)
-        if (r.changed) {
-          touched = true
-          changed = true
-          if (String(r.text).trim()) {
-            out.push(typeof p === "object" ? Object.assign({}, p, { text: r.text }) : r.text)
+        if (Array.isArray(body.input)) targets.push.apply(targets, readRoleTargets(body.input, "input", false))
+        return targets.length ? targets : null
+      },
+      applyChanges: function (body, targets, results) {
+        const byIndex = Object.create(null)
+        targets.forEach(function (target) { if (target.id.indexOf("input:") === 0 && results[target.id] && results[target.id].changed) byIndex[target.index] = { target: target, result: results[target.id] } })
+        if (Array.isArray(body.input)) {
+          const input = []
+          for (let i = 0; i < body.input.length; i++) {
+            const update = byIndex[i]
+            if (!update) input.push(body.input[i])
+            else if (!update.result.drop) input.push(Object.assign({}, body.input[i], { content: buildContent(update.target, update.result) }))
           }
-          continue
+          body.input = input
+        }
+        const instruction = results.instructions
+        if (instruction && instruction.changed) {
+          if (instruction.drop) delete body.instructions
+          else body.instructions = buildContent(targets.filter(function (target) { return target.id === "instructions" })[0], instruction)
         }
       }
-      out.push(p)
+    },
+    gemini: {
+      readTargets: function (body) {
+        const key = body.systemInstruction !== undefined ? "systemInstruction" : body.system_instruction !== undefined ? "system_instruction" : null
+        if (!key) return null
+        const instruction = body[key]
+        let target = null
+        if (typeof instruction === "string") target = makeContentTarget("system", instruction, key, false)
+        else if (instruction && typeof instruction === "object" && Array.isArray(instruction.parts)) {
+          target = makeContentTarget("system", instruction.parts, key, true)
+          if (target) { target.format = "gemini-parts"; target.sourceInstruction = instruction; target.key = key }
+        }
+        return target ? [target] : null
+      },
+      applyChanges: function (body, targets, results) {
+        const target = targets[0]
+        const result = results[target.id]
+        if (!result || !result.changed) return
+        if (result.drop) { delete body[target.id]; return }
+        if (target.format === "gemini-parts") {
+          const updated = Object.assign({}, target.sourceInstruction, { parts: buildContent(target, result) })
+          if (updated.parts.length === 0) delete body[target.key]
+          else body[target.key] = updated
+        } else body[target.id] = buildContent(target, result)
+      }
     }
-    if (touched) next = Object.assign({}, si, { parts: out })
   }
-  if (!changed) return false
-  if (typeof next === "string" && !next.trim()) delete body[key]
-  else body[key] = next
-  return true
+}
+
+const ADAPTERS = createAdapters()
+
+function buildContent(target, result) {
+  if (target.format === "gemini-parts") {
+    const arrayTarget = Object.assign({}, target, { format: "array", source: target.sourceInstruction.parts })
+    return buildContent(arrayTarget, result)
+  }
+  if (target.format === "string") return result.segments[0] && !result.segments[0].deleted ? result.segments[0].text : ""
+  const updates = Object.create(null)
+  for (let i = 0; i < result.segments.length; i++) updates[result.segments[i].index] = result.segments[i]
+  const output = []
+  for (let i = 0; i < target.source.length; i++) {
+    const updated = updates[i]
+    const original = target.source[i]
+    if (!updated) output.push(original)
+    else if (!updated.deleted) {
+      if (updated.kind === "text-object") output.push(updated.text === original.text ? original : Object.assign({}, original, { text: updated.text }))
+      else output.push(updated.text)
+    }
+  }
+  return output
 }
 
 export function onRequest(body, ctx) {
   if (!body || typeof body !== "object" || Array.isArray(body)) return body
   const options = ctx && typeof ctx === "object" ? ctx.options : null
-  const rules = getMatchers(options)
-  if (rules.length === 0) return body
-  const stripAll = !!(options && options.stripAll === true)
+  const compilation = compileRules(options)
+  if (compilation.error) {
+    log(options, "invalid configuration: " + compilation.error)
+    return body
+  }
+  if (compilation.rules.length === 0) return body
   const protocol = ctx && ctx.protocol
-
-  let changed = false
-  if (protocol === "chat") changed = stripChatSystem(body, rules, stripAll)
-  else if (protocol === "anthropic") changed = stripAnthropicSystem(body, rules, stripAll)
-  else if (protocol === "responses") changed = stripResponsesSystem(body, rules, stripAll)
-  else if (protocol === "gemini") changed = stripGeminiSystem(body, rules, stripAll)
-  else {
-    // 协议未知时按已知形状逐个尝试（各函数只读自己的字段，互不干扰）
-    changed = stripChatSystem(body, rules, stripAll)
-    if (!changed) changed = stripAnthropicSystem(body, rules, stripAll)
-    if (!changed) changed = stripResponsesSystem(body, rules, stripAll)
-    if (!changed) changed = stripGeminiSystem(body, rules, stripAll)
+  const adapter = ADAPTERS[protocol]
+  if (!adapter) {
+    log(options, "unsupported protocol: " + String(protocol || "unknown"))
+    return body
   }
-
-  if (changed && options && options.debug === true) {
-    const tag = protocol || "unknown"
-    const model = ctx && ctx.model ? ctx.model : "?"
-    console.log("[strip-harness] " + tag + " " + model + ": removed harness prompt from system role")
+  const targets = adapter.readTargets(body)
+  if (!targets) return body
+  const results = Object.create(null)
+  let modifications = 0
+  const appliedRules = []
+  for (let i = 0; i < targets.length; i++) {
+    const result = executeTarget(targets[i], compilation.rules)
+    results[targets[i].id] = result
+    if (result.changed) {
+      modifications += result.changes.length
+      for (let j = 0; j < result.changes.length; j++) appliedRules.push(result.changes[j].ruleId + ":" + result.changes[j].action)
+    }
   }
+  if (modifications === 0) return body
+  adapter.applyChanges(body, targets, results)
+  log(options, protocol + " " + (ctx && ctx.model ? ctx.model : "?") + ": applied " + modifications + " rule change(s): " + appliedRules.join(", "))
   return body
 }
