@@ -1,30 +1,47 @@
 {
   "name": "magpie-strip-harness",
   "version": "0.1.0",
-  "description": "magpie gateway middleware: config-driven stripping of harness identity prompts from the system role of agent requests",
+  "description": "Magpie middleware for conservative, rule-based cleanup of harness identity prompts",
   "type": "module",
   "keywords": ["opencode", "opencode-plugin", "magpie", "middleware", "system-prompt"],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/aqiu817/magpie-strip-harness.git"
+    "url": "git+https://github.com/moonqianqiu/magpie-strip-harness.git"
   },
-  "homepage": "https://github.com/aqiu817/magpie-strip-harness#readme",
+  "homepage": "https://github.com/moonqianqiu/magpie-strip-harness#readme",
   "bugs": {
-    "url": "https://github.com/aqiu817/magpie-strip-harness/issues"
+    "url": "https://github.com/moonqianqiu/magpie-strip-harness/issues"
   },
   "magpie": {
     "middleware": "./strip.middleware.js",
     "options": {
-      "patterns": [
-        "/deepseek[\\s_-]*harness/i",
-        { "match": "/You are ZCode, an interactive agent/i" },
-        { "match": "/^# ZCode Desktop Context\\s*$/i", "replace": "# Desktop Context" },
-        { "match": "/window\\.zcode/i", "replace": "window" },
-        { "match": ".zcode" },
-        { "match": "/[._-]*z[._-]*code/i", "replace": "" }
-      ],
-      "stripAll": false,
+      "rules": {
+        "version": 1,
+        "rules": [
+          {
+            "id": "deepseek.identity-opening",
+            "roles": ["system"],
+            "unit": "line",
+            "match": { "type": "regex", "value": "^\\s*You are an AI agent powered by DeepSeek Harness\\.?\\s*$", "flags": "i" },
+            "action": { "type": "delete" }
+          },
+          {
+            "id": "zcode.identity-opening",
+            "roles": ["system"],
+            "unit": "line",
+            "match": { "type": "regex", "value": "^\\s*You are ZCode, an interactive agent\\.?\\s*$", "flags": "i" },
+            "action": { "type": "delete" }
+          },
+          {
+            "id": "zcode.context-heading",
+            "roles": ["system"],
+            "unit": "line",
+            "match": { "type": "regex", "value": "^\\s*# ZCode Desktop Context\\s*$", "flags": "i" },
+            "action": { "type": "replace", "value": "# Desktop Context" }
+          }
+        ]
+      },
       "debug": false
     }
   }
