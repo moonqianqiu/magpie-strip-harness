@@ -1,127 +1,66 @@
 # magpie-strip-harness
 
-English | [简体中文](README.zh-CN.md)
+一个 [magpie](https://usemagpie.ai) 请求中间件：在请求路由前，按明确配置谨慎清理受支持协议中的 harness 身份提示。只修改请求，不处理回复或流事件。
 
-A [magpie](https://usemagpie.ai) gateway middleware that strips **harness-injected identity prompts** from the `system` role of agent requests before they are routed to any provider. It is entirely **config-driven**: the middleware knows nothing about any particular harness — you describe what to remove with `patterns`, and the same machinery works for DeepSeek Harness, ZCode, or your own agent.
+## 配置
 
-It edits requests only; replies and stream events pass through untouched. It applies to every provider behind the magpie gateway.
+随包规则位于 `package.json` 的 `magpie.options.rules`。规则采用有版本号、按顺序执行的统一结构：
 
-## Why
+```json
+{
+  "rules": {
+    "version": 1,
+    "rules": [
+      {
+        "id": "agent.identity-opening",
+        "roles": ["system"],
+        "unit": "line",
+        "match": {
+          "type": "regex",
+          "value": "^\\s*You are ExampleAgent, an interactive agent\\.?\\s*$",
+          "flags": "i"
+        },
+        "action": { "type": "delete" }
+      }
+    ]
+  }
+}
+```
 
-Agent harnesses typically prepend identity framing to the system prompt — an opener ("You are X, an interactive agent"), product headings, workspace paths, or embedded API names. Through a reverse proxy that framing is visible to the upstream model. This middleware removes it at the gateway so you do not have to touch every client's config.
+每条规则显式声明 `id`、`roles`、`unit`、`match` 和 `action`。匹配类型为 `exact`、`contains`、`regex`。正则 flags 仅接受 `i`、`m`、`s`、`u`；会引入状态行为的 `g`、`y` 不接受。规则严格按配置顺序执行，前一条替换后的文本可供后续规则匹配。
 
-The tricky part is that identity tokens are often mixed into lines that also carry **executable rules**. Dropping whole paragraphs would delete those rules, so `patterns` supports both paragraph-level deletion and precise line-level deletion / in-place replacement. You pick the granularity per rule.
+匹配单位为 `span`、`line`、`block`、`target`。`delete` / `replace` 只作用于声明的单位；只有 `target` 规则可以使用 `drop-target` 删除整个逻辑 system 目标。没有段落降级、隐式扩大范围或全局 `stripAll` 覆盖。文本块边界会保留；只有显式的 target 规则才会合并检查多个文本片段。非文本块及其元数据不参与匹配并保持原样。
 
-## Install
+随包默认规则只删除精确的 ZCode / DeepSeek 身份开场行，并将精确的 ZCode 上下文标题改名。默认不会删除正文中的产品名、`.zcode` 路径或 `window.zcode` API。只有确认对应内容确实由 harness 注入时，才应添加范围明确的规则。
+
+`rules: { "version": 1, "rules": [] }` 表示禁用清理；未提供规则也不处理。随包默认规则由 magpie 通过 `magpie.options` 注入。配置无效时，开启 `debug` 会记录错误，请求保持不变；程序不会静默回退到更宽泛的规则。
+
+## 协议
+
+中间件通过 `ctx.protocol` 选择唯一适配器。未知协议保持不变。
+
+| 协议 | 处理目标 |
+| --- | --- |
+| `chat` | `messages[]` 中的 system/developer 消息 |
+| `anthropic` | `system` 字符串或文本 blocks |
+| `responses` | `instructions` 及 `input[]` 中的 system/developer 项 |
+| `gemini` | `systemInstruction` / `system_instruction` 字符串或 parts |
+
+规则通过 `roles` 限定角色。默认规则只处理 `system`；`developer` 需要显式开启，因为其中可能有应用作者提供的约束。未修改的消息、字段、block 和非文本内容都会保留。经显式删除后变空的目标会按各自协议结构移除。
+
+## 安装与验证
 
 ```sh
 git clone https://github.com/aqiu817/magpie-strip-harness.git
 magpie plugin add ./magpie-strip-harness
+node test.mjs
 ```
 
-(or add the cloned folder path in the app: Plugins → Add plugin). The package has no `main`/`exports`, so magpie treats it as pure middleware.
+在插件选项中设置 `debug: true`，可记录配置错误和规则修改摘要。仍需在真实 magpie 网关环境验证，因为本地 Node 测试不能证明运行时 `ctx.protocol` 与 options 注入形状。
 
-## How it strips
+## 边界
 
-Two granularities, chosen by the shape of each `patterns` entry:
-
-1. **Plain string** (`"/regex/i"` or a case-insensitive substring) — **paragraph-level**. Split on blank lines and drop matching paragraphs; if there is no blank-line structure, or that would wipe the whole text, drop matching *lines* instead. Plain strings keep the original conservative behavior, so existing configs keep working.
-2. **Object** `{ "match": "...", "replace": "..." }` — **line-level**, applied in config order to each line:
-   - without `replace`, drop the matching **line** — never a heading plus all its subsections;
-   - with `replace`, substitute the matched span *in place*, keeping the rest of the line. This neutralizes a token embedded in an executable instruction without losing the instruction.
-
-The minimum deletion unit for object rules is a **line**: if only some lines of a section match, the heading and the other lines survive. Paragraph rules run first, then line rules.
-
-A message/field that ends up empty is removed entirely (`body.system` deleted, empty chat `system` message dropped). Anthropic `cache_control` and other block fields are preserved on surviving blocks.
-
-Works across protocols — the body is read in the agent's own API format:
-
-| Protocol | Fields handled |
-| --- | --- |
-| `chat` | `messages[]` with `role: system` / `developer` (string or content parts) |
-| `anthropic` | `system` (string or blocks array) |
-| `responses` | `instructions` + `input[]` system/developer items |
-| `gemini` | `systemInstruction` / `system_instruction` (string or `{parts}`) |
-| unknown | tries all of the above shapes defensively |
-
-## Options
-
-Edit in the app (Plugins → installed → options) or:
-
-```sh
-magpie plugin options magpie-strip-harness '{"debug": true}'
-```
-
-| Option | Default | Meaning |
-| --- | --- | --- |
-| `patterns` | see [Example configs](#example-configs) | Two kinds of entry. A **plain string** (`"/regex/i"`, or any other string treated as a case-insensitive substring) is a paragraph-level delete rule. An **object** `{ "match": "...", "replace": "..." }` is a line-level rule: `replace` substitutes the matched span in place (keeping the rest of the line), omit it to delete matching lines. Rules apply in order to each line. Providing `patterns` **replaces** the defaults; if every entry is invalid (e.g. a regex typo), the defaults are used instead so stripping never silently turns off. |
-| `stripAll` | `false` | When any pattern matches a system text, remove the whole system content instead of surgical stripping. |
-| `debug` | `false` | Log one line to the magpie log (`plugin: [strip-harness] …`) per modified request. |
-
-## Example configs
-
-The shipped default (`package.json` → `magpie.options.patterns`) is only one example and can be replaced wholesale. Nothing in the processing code is tied to a specific harness.
-
-### Minimal: one paragraph-level rule (DeepSeek Harness)
-
-```json
-{ "patterns": ["/deepseek[\\s_-]*harness/i"] }
-```
-
-Whole paragraphs mentioning the harness are dropped. Works when identity framing lives in its own paragraph.
-
-### Full: line-level deletion + in-place replacement (ZCode)
-
-```json
-{
-  "patterns": [
-    "/deepseek[\\s_-]*harness/i",
-    { "match": "/You are ZCode, an interactive agent/i" },
-    { "match": "/^# ZCode Desktop Context\\s*$/i", "replace": "# Desktop Context" },
-    { "match": "/window\\.zcode/i", "replace": "window" },
-    { "match": ".zcode" },
-    { "match": "/[._-]*z[._-]*code/i", "replace": "" }
-  ]
-}
-```
-
-- Delete the identity opener line, keep the generic agent description on the next line.
-- Rename the heading; keep every subsection.
-- Delete `.zcode` path lines wholesale (no broken paths left behind).
-- Replace `window.zcode` in place so "Load the skill before generating an interactive view." survives.
-- The last rule is a catch-all that neutralizes any remaining token.
-
-**Order matters**: rules act on the line as left by the previous ones. The `window.zcode` rewrite must come before the `.zcode` deletion rule, otherwise that instruction line gets dropped. A bare `"/[._-]*z[._-]*code/i"` is a *paragraph* rule and will delete whole sections — use the object form for line precision.
-
-### Template: your own harness
-
-```json
-{
-  "patterns": [
-    { "match": "/You are MyAgent, a CLI helper/i" },
-    { "match": "/^# MyAgent Context$/i", "replace": "# Context" },
-    { "match": "/window\\.myagent/i", "replace": "window" },
-    { "match": ".myagent" }
-  ]
-}
-```
-
-Replace `MyAgent` / `myagent` with your harness's names. The same four moves apply to any harness: delete the opener line, soften the heading, delete product-specific path lines, neutralize embedded API names.
-
-## Verify
-
-```sh
-magpie plugin options magpie-strip-harness '{"debug": true}'
-# then send a request through the gateway with a harness opener in the system role, e.g.
-curl http://127.0.0.1:3425/v1/chat/completions \
-  -H "Authorization: Bearer <gateway-key>" -H "content-type: application/json" \
-  -d '{"model":"<provider>/<model>","messages":[{"role":"system","content":"You are an AI agent powered by DeepSeek Harness.\n\nBe concise."},{"role":"user","content":"hi"}]}'
-```
-
-The magpie log shows `[strip-harness] chat <model>: removed harness prompt from system role`, and the upstream request goes out without the opener. Settings → Plugins also shows the middleware's call count and failures.
-
-## Limits
-
-- Object rules remove at **line** granularity and can rewrite a matched span in place. Plain-string rules still operate on blank-line paragraphs. A system prompt squeezed into one line cannot be partially stripped at line granularity — use `stripAll` or a `replace` rule.
-- Editing the system prompt naturally invalidates provider-side prompt caching for that request.
-- magpie's own internal requests (session titles, router classification) never pass through middleware.
+- 文本匹配无法证明内容来源。优先使用完整、高置信度的身份声明，不要把产品名或 token 的出现本身当作删除依据。
+- `span` 和 `line` 只在单个文本片段中匹配。`target` 检测时会用换行符连接目标的文本片段，应仅用于明确的整目标删除。
+- 正则长度有限制，并拒绝有状态 flags；管理员仍应避免不必要的复杂正则。
+- 修改 system 提示可能导致供应商侧提示缓存对该请求失效。
