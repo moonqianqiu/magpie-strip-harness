@@ -36,6 +36,33 @@ test("high-confidence defaults strip identity lines but retain neighboring instr
   assert.equal(body.messages[0].content, "You are a helpful coding assistant.\n# Desktop Context\nKeep this instruction.")
 })
 
+test("sample-derived DSH and ZCode defaults remove identity framing only", () => {
+  const dshOpener = "You are an AI agent powered by DeepSeek Harness."
+  const dshFollowing = "You are a coding agent powered by the selected model."
+  const dshBody = { messages: [{ role: "system", content: dshOpener + "\n\n" + dshFollowing }] }
+  onRequest(dshBody, context("chat"))
+  assert.ok(!dshBody.messages[0].content.includes(dshOpener))
+  assert.ok(dshBody.messages[0].content.includes(dshFollowing))
+
+  const zcodeBody = { messages: [{ role: "system", content: [
+    "You are ZCode, an interactive agent",
+    "You are an agent working with the user toward their goals.",
+    "# Harness",
+    "Tools run behind a user-selected permission mode.",
+    "# ZCode Desktop Context",
+    "Use the restricted window.zcode bridge.",
+    "Working directory: C:\\Users\\WindLight\\.zcode\\workspace"
+  ].join("\n") }] }
+  onRequest(zcodeBody, context("chat"))
+  const cleaned = zcodeBody.messages[0].content
+  assert.ok(!cleaned.includes("You are ZCode, an interactive agent"))
+  assert.ok(cleaned.includes("You are an agent working with the user toward their goals."))
+  assert.ok(cleaned.includes("# Harness"))
+  assert.ok(cleaned.includes("# Desktop Context"))
+  assert.ok(cleaned.includes("window.zcode"))
+  assert.ok(cleaned.includes(".zcode\\workspace"))
+})
+
 test("product name mentions and API instructions are not default deletion signals", () => {
   const original = "Prefer DeepSeek Harness-compatible tool names.\nUse window.zcode to access the runtime API.\nA .zcode path may be configured."
   const body = { messages: [{ role: "system", content: original }] }

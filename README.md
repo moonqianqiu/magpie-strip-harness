@@ -31,7 +31,7 @@
 
 匹配单位为 `span`、`line`、`block`、`target`。`delete` / `replace` 只作用于声明的单位；只有 `target` 规则可以使用 `drop-target` 删除整个逻辑 system 目标。没有段落降级、隐式扩大范围或全局 `stripAll` 覆盖。文本块边界会保留；只有显式的 target 规则才会合并检查多个文本片段。非文本块及其元数据不参与匹配并保持原样。
 
-随包默认规则只删除精确的 ZCode / DeepSeek 身份开场行，并将精确的 ZCode 上下文标题改名。默认不会删除正文中的产品名、`.zcode` 路径或 `window.zcode` API。只有确认对应内容确实由 harness 注入时，才应添加范围明确的规则。
+随包默认规则依据 `example/` 中的 DSH 和 ZCode 请求样本，只删除精确的身份开场行，并将 `# ZCode Desktop Context` 改为 `# Desktop Context`。样本中的有效工具/安全指令、工作目录和 `window.zcode` API 会保留；正文提及产品名、`.zcode` 路径或 API 也不会单独触发删除。只有确认对应内容确实由 harness 注入且不影响指令功能时，才应添加范围明确的规则。
 
 `rules: { "version": 1, "rules": [] }` 表示禁用清理；未提供规则也不处理。随包默认规则由 magpie 通过 `magpie.options` 注入。配置无效时，开启 `debug` 会记录错误，请求保持不变；程序不会静默回退到更宽泛的规则。
 
