@@ -1,9 +1,9 @@
 {
   "name": "magpie-strip-harness",
   "version": "0.1.0",
-  "description": "magpie gateway middleware: strip DeepSeek Harness identity prompt from the system role of agent requests",
+  "description": "magpie gateway middleware: config-driven stripping of harness identity prompts from the system role of agent requests",
   "type": "module",
-  "keywords": ["opencode", "opencode-plugin", "magpie", "middleware", "deepseek"],
+  "keywords": ["opencode", "opencode-plugin", "magpie", "middleware", "system-prompt"],
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -16,7 +16,14 @@
   "magpie": {
     "middleware": "./strip.middleware.js",
     "options": {
-      "patterns": ["/deepseek[\\s_-]*harness/i"],
+      "patterns": [
+        "/deepseek[\\s_-]*harness/i",
+        { "match": "/You are ZCode, an interactive agent/i" },
+        { "match": "/^# ZCode Desktop Context\\s*$/i", "replace": "# Desktop Context" },
+        { "match": "/window\\.zcode/i", "replace": "window" },
+        { "match": ".zcode" },
+        { "match": "/[._-]*z[._-]*code/i", "replace": "" }
+      ],
       "stripAll": false,
       "debug": false
     }
