@@ -39,6 +39,34 @@
             "unit": "line",
             "match": { "type": "regex", "value": "^\\s*# ZCode Desktop Context\\s*$", "flags": "i" },
             "action": { "type": "replace", "value": "# Desktop Context" }
+          },
+          {
+            "id": "codexcli.identity-opening",
+            "roles": ["developer"],
+            "unit": "line",
+            "match": { "type": "regex", "value": "^\\s*You are Codex, an agent based on GPT-5\\. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled\\.?\\s*$", "flags": "i" },
+            "action": { "type": "replace", "value": "You are an agent. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled." }
+          },
+          {
+            "id": "codexcli.cli-identity-opening",
+            "roles": ["developer"],
+            "unit": "line",
+            "match": { "type": "regex", "value": "^\\s*You are a coding agent running in the Codex CLI, a terminal-based coding assistant\\. Codex CLI is an open source project led by OpenAI\\. You are expected to be precise, safe, and helpful\\.?\\s*$", "flags": "i" },
+            "action": { "type": "replace", "value": "You are a coding agent. You are expected to be precise, safe, and helpful." }
+          },
+          {
+            "id": "codexcli.persona-opening",
+            "roles": ["developer"],
+            "unit": "span",
+            "match": { "type": "contains", "value": "As Codex, you are" },
+            "action": { "type": "replace", "value": "You are" }
+          },
+          {
+            "id": "codexcli.context-clarifier",
+            "roles": ["developer"],
+            "unit": "line",
+            "match": { "type": "regex", "value": "^\\s*Within this context, Codex refers to the open-source agentic coding interface \\(not the old Codex language model built by OpenAI\\)\\.?\\s*$", "flags": "i" },
+            "action": { "type": "delete" }
           }
         ]
       },
