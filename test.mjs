@@ -63,6 +63,58 @@ test("sample-derived DSH and ZCode defaults remove identity framing only", () =>
   assert.ok(cleaned.includes(".zcode\\workspace"))
 })
 
+test("Codex CLI defaults de-brand developer identity while keeping functional content", () => {
+  const body = { input: [
+    { role: "developer", content: [{ type: "text", text: [
+      "You are Codex, an agent based on GPT-5. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.",
+      "",
+      "# Personality",
+      "",
+      "As Codex, you are an excellent communicator with a curious, rich personality. You match the tone of the user."
+    ].join("\n") }] },
+    { role: "developer", content: [
+      { type: "text", text: [
+        "<model_switch>",
+        "The user was previously using a different model. Please continue the conversation according to the following instructions:",
+        "",
+        "You are a coding agent running in the Codex CLI, a terminal-based coding assistant. Codex CLI is an open source project led by OpenAI. You are expected to be precise, safe, and helpful.",
+        "",
+        "Your capabilities:",
+        "- Receive user prompts and other context provided by the harness, such as files in the workspace.",
+        "",
+        "Within this context, Codex refers to the open-source agentic coding interface (not the old Codex language model built by OpenAI).",
+        "",
+        "You are a coding agent. Please keep going until the query is completely resolved, before ending your turn and yielding back to the user.",
+        "",
+        "Never repurpose `$HOME`, `$home`, or `$CODEX_HOME`."
+      ].join("\n") },
+      { type: "text", text: "skill-installer: Install Codex skills into $CODEX_HOME/skills from a curated list." }
+    ] },
+    { role: "user", content: [{ type: "text", text: "hello" }] }
+  ] }
+  onRequest(body, context("responses"))
+  assert.equal(body.input.length, 3)
+  const main = body.input[0].content[0].text
+  assert.ok(main.startsWith("You are an agent. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled."))
+  assert.ok(!main.includes("Codex"))
+  assert.ok(main.includes("# Personality"))
+  assert.ok(main.includes("You are an excellent communicator with a curious, rich personality."))
+  assert.equal(body.input[1].content.length, 2)
+  const inner = body.input[1].content[0].text
+  assert.ok(inner.includes("<model_switch>"))
+  assert.ok(inner.includes("The user was previously using a different model."))
+  assert.ok(inner.includes("You are a coding agent. You are expected to be precise, safe, and helpful."))
+  assert.ok(!inner.includes("Codex CLI is an open source project led by OpenAI"))
+  assert.ok(!inner.includes("Within this context, Codex refers to"))
+  assert.ok(inner.includes("You are a coding agent. Please keep going until the query is completely resolved"))
+  assert.ok(inner.includes("$CODEX_HOME"))
+  assert.ok(body.input[1].content[1].text.includes("Install Codex skills into $CODEX_HOME/skills"))
+  assert.equal(body.input[2].role, "user")
+  const once = JSON.stringify(body)
+  onRequest(body, context("responses"))
+  assert.equal(JSON.stringify(body), once)
+})
+
 test("product name mentions and API instructions are not default deletion signals", () => {
   const original = "Prefer DeepSeek Harness-compatible tool names.\nUse window.zcode to access the runtime API.\nA .zcode path may be configured."
   const body = { messages: [{ role: "system", content: original }] }
