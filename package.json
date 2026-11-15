@@ -41,6 +41,13 @@
             "action": { "type": "replace", "value": "# Desktop Context" }
           },
           {
+            "id": "pi.identity-opening",
+            "roles": ["developer"],
+            "unit": "line",
+            "match": { "type": "regex", "value": "^\\s*You are a coding assistant running inside pi, a coding agent harness\\. Help users inspect files, run commands, and modify code\\.?\\s*$", "flags": "i" },
+            "action": { "type": "replace", "value": "You are a coding assistant. Help users inspect files, run commands, and modify code." }
+          },
+          {
             "id": "codexcli.identity-opening",
             "roles": ["developer"],
             "unit": "line",

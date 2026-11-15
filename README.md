@@ -31,7 +31,7 @@
 
 匹配单位为 `span`、`line`、`block`、`target`。`delete` / `replace` 只作用于声明的单位；只有 `target` 规则可以使用 `drop-target` 删除整个逻辑 system 目标。没有段落降级、隐式扩大范围或全局 `stripAll` 覆盖。文本块边界会保留；只有显式的 target 规则才会合并检查多个文本片段。非文本块及其元数据不参与匹配并保持原样。
 
-随包默认规则中，ZCode 部分依据 `example/` 中的 ZCode 请求样本；Codex CLI 部分依据 `example/` 中的 CodexCli 请求样本；DSH 部分只删除已知的 DSH 身份开场行，不依赖样本文件。默认规则只处理精确、高置信度的身份内容：DSH/ZCode 删除 system 消息中的身份开场行，ZCode 规则还将 `# ZCode Desktop Context` 改为 `# Desktop Context`；Codex CLI 把 developer 消息中的两条身份开场行替换为去品牌通用表述，去掉 `As Codex, you are` 前缀，并删除身份行移除后失去指代对象的 `Within this context, Codex refers to...` 说明行。样本中的有效工具/安全指令、工作目录和 `window.zcode` API 会保留；正文中的路径、工具名、API token 等功能性提及不会单独触发删除。只有确认对应内容确实由 harness 注入且不影响指令功能时，才应添加范围明确的规则。
+随包默认规则中，ZCode 部分依据 `example/` 中的 ZCode 请求样本；Codex CLI 部分依据 `example/` 中的 CodexCli 请求样本；Pi 部分依据 `example/` 中的 Pi 请求样本；DSH 部分只删除已知的 DSH 身份开场行，不依赖样本文件。默认规则只处理精确、高置信度的身份内容：DSH/ZCode 删除 system 消息中的身份开场行，ZCode 规则还将 `# ZCode Desktop Context` 改为 `# Desktop Context`；Codex CLI 把 developer 消息中的两条身份开场行替换为去品牌通用表述，去掉 `As Codex, you are` 前缀，并删除身份行移除后失去指代对象的 `Within this context, Codex refers to...` 说明行；Pi 把 developer 消息中的身份开场行替换为去品牌表述（去掉 `running inside pi, a coding agent harness`）。样本中的有效工具/安全指令、工作目录、`window.zcode` API、pi 的 `PI_*` 环境变量与 `<docs>` 文档指引会保留；正文中的路径、工具名、API token 等功能性提及不会单独触发删除。只有确认对应内容确实由 harness 注入且不影响指令功能时，才应添加范围明确的规则。
 
 `rules: { "version": 1, "rules": [] }` 表示禁用清理；未提供规则也不处理。随包默认规则由 magpie 通过 `magpie.options` 注入。配置无效时，开启 `debug` 会记录错误，请求保持不变；程序不会静默回退到更宽泛的规则。
 
@@ -46,7 +46,7 @@
 | `responses` | `instructions` 及 `input[]` 中的 system/developer 项 |
 | `gemini` | `systemInstruction` / `system_instruction` 字符串或 parts |
 
-规则通过 `roles` 限定角色。默认规则中 DSH/ZCode 处理 `system`；Codex CLI 规则处理 `developer`（Codex CLI 将身份提示注入 developer 消息），其余 `developer` 内容仍需显式规则才处理。未修改的消息、字段、block 和非文本内容都会保留。经显式删除后变空的目标会按各自协议结构移除。
+规则通过 `roles` 限定角色。默认规则中 DSH/ZCode 处理 `system`；Codex CLI 和 Pi 规则处理 `developer`（两者都将身份提示注入 developer 消息），其余 `developer` 内容仍需显式规则才处理。未修改的消息、字段、block 和非文本内容都会保留。经显式删除后变空的目标会按各自协议结构移除。
 
 ## 安装与验证
 

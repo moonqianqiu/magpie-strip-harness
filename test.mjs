@@ -115,6 +115,44 @@ test("Codex CLI defaults de-brand developer identity while keeping functional co
   assert.equal(JSON.stringify(body), once)
 })
 
+test("Pi defaults de-brand developer identity while keeping functional content", () => {
+  const body = { messages: [
+    { role: "developer", content: [
+      "You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.",
+      "",
+      "<rules>",
+      "- Use read to examine files instead of cat or sed.",
+      "- You can inspect PI_* environment variables for current model and session details.",
+      "</rules>",
+      "",
+      "<docs>",
+      "Pi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):",
+      "- Main documentation: C:\\Users\\WindLight\\AppData\\Local\\Programs\\AIBIN\\pi\\README.md",
+      "</docs>",
+      "",
+      "<cwd>",
+      "D:/WindLight/Documents/Code/DeepBlue/bidding-qa-system-next",
+      "</cwd>"
+    ].join("\n") },
+    { role: "user", content: "hello" }
+  ] }
+  onRequest(body, context("chat"))
+  assert.equal(body.messages.length, 2)
+  const dev = body.messages[0].content
+  assert.ok(dev.startsWith("You are a coding assistant. Help users inspect files, run commands, and modify code."))
+  assert.ok(!dev.includes("inside pi"))
+  assert.ok(!dev.includes("coding agent harness"))
+  assert.ok(dev.includes("Use read to examine files instead of cat or sed."))
+  assert.ok(dev.includes("PI_* environment variables"))
+  assert.ok(dev.includes("Pi documentation (read only when the user asks about the harness itself"))
+  assert.ok(dev.includes("AIBIN\\pi\\README.md"))
+  assert.ok(dev.includes("D:/WindLight/Documents/Code/DeepBlue/bidding-qa-system-next"))
+  assert.equal(body.messages[1].role, "user")
+  const once = JSON.stringify(body)
+  onRequest(body, context("chat"))
+  assert.equal(JSON.stringify(body), once)
+})
+
 test("product name mentions and API instructions are not default deletion signals", () => {
   const original = "Prefer DeepSeek Harness-compatible tool names.\nUse window.zcode to access the runtime API.\nA .zcode path may be configured."
   const body = { messages: [{ role: "system", content: original }] }
