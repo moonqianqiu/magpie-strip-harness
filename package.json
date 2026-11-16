@@ -1,6 +1,6 @@
 {
   "name": "magpie-strip-harness",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Magpie middleware for conservative, rule-based cleanup of harness identity prompts",
   "type": "module",
   "keywords": ["opencode", "opencode-plugin", "magpie", "middleware", "system-prompt"],
